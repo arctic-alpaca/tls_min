@@ -1,33 +1,25 @@
-use async_stream::stream;
-use axum::{
-    extract::{ConnectInfo, Extension},
-    handler::Handler,
-    http::{uri::Uri, Request, Response},
-    response::IntoResponse,
-    AddExtensionLayer,
-};
+
+use axum::{handler::Handler, http::{Request, Response}, response::IntoResponse};
 use core::task::{Context, Poll};
-use futures::{future::TryFutureExt, stream::Stream};
+use futures::{stream::Stream};
 use hyper::Body;
-use hyper::Server;
+
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::pin::Pin;
 use std::vec::Vec;
-use std::{convert::TryFrom, io, net::SocketAddr, sync};
+use std::{io, net::SocketAddr, sync};
+
+use hyper::server::conn::Http;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self};
 use tokio_rustls::rustls::{Certificate, PrivateKey};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
-use tower::ServiceBuilder;
-
-fn error(err: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
-}
+use tower::{ ServiceBuilder};
 
 #[tokio::main]
 async fn main() {
@@ -58,40 +50,23 @@ async fn main() {
         sync::Arc::new(config)
     };
 
-    let tcp = TcpListener::bind(&tls_addr).await.unwrap();
+    let tcp_listener = TcpListener::bind(&tls_addr).await.unwrap();
     let tls_acceptor = TlsAcceptor::from(tls_cfg);
-
-    let incoming_tls_stream = stream! {
-        loop {
-            let (socket, _) = tcp.accept().await?;
-            let stream = tls_acceptor.accept(socket).map_err(|e| {
-                println!("[!] Voluntary server halt due to client-connection error...");
-                // Errors could be handled here, instead of server aborting.
-                // Ok(None)
-                error(format!("TLS Error: {:?}", e))
-            });
-            yield stream.await;
-        }
-    };
 
     let tls_service = ServiceBuilder::new().service(handler);
 
-    // This is the approach that's currently not working
-    /*
-        let tls_server_non_working = Server::builder(HyperAcceptor {
-            acceptor: Box::pin(incoming_tls_stream),
-        })
-        .serve(tls_service.into_make_service_with_connect_info::<SocketAddr, _>())
-        .await
-        .unwrap();
-    */
+    loop {
+        let (stream, _addr) = tcp_listener.accept().await.unwrap();
+        let acceptor = tls_acceptor.clone();
 
-    let tls_server_working = Server::builder(HyperAcceptor {
-        acceptor: Box::pin(incoming_tls_stream),
-    })
-    .serve(tls_service.into_make_service())
-    .await
-    .unwrap();
+        let tls_service = tls_service.clone();
+
+        tokio::spawn(async move {
+            if let Ok(stream) = acceptor.accept(stream).await {
+                let _ = Http::new().serve_connection(stream, tls_service.into_service()).await;
+            }
+        });
+    }
 }
 
 struct HyperAcceptor<'a> {
