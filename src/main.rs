@@ -55,6 +55,7 @@ async fn main() {
 
     let tls_service = ServiceBuilder::new().service(handler);
 
+    let tls_server = tokio::spawn ( async move {
     loop {
         let (stream, _addr) = tcp_listener.accept().await.unwrap();
         let acceptor = tls_acceptor.clone();
@@ -66,7 +67,18 @@ async fn main() {
                 let _ = Http::new().serve_connection(stream, tls_service.into_service()).await;
             }
         });
-    }
+    }});
+    let non_tls_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
+    let non_tls_server = axum::Server::bind(&non_tls_addr)
+        .serve(tls_service.into_make_service());
+    tokio::select! {
+        _ = (tls_server) => {
+            tracing::trace!("tls server stopped");
+            return;},
+        _ = (non_tls_server) => {
+            tracing::trace!("non_tls server stopped");
+            return;},
+    };
 }
 
 struct HyperAcceptor<'a> {
