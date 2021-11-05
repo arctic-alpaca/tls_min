@@ -1,9 +1,3 @@
-use rustls_pemfile::{certs, pkcs8_private_keys};
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
-use std::vec::Vec;
-use tokio_rustls::rustls::{Certificate, PrivateKey};
 use async_stream::stream;
 use axum::{
     extract::{ConnectInfo, Extension},
@@ -14,19 +8,22 @@ use axum::{
 };
 use core::task::{Context, Poll};
 use futures::{future::TryFutureExt, stream::Stream};
+use hyper::Body;
 use hyper::Server;
-use hyper::{client::HttpConnector, Body};
+use rustls_pemfile::{certs, pkcs8_private_keys};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use std::pin::Pin;
+use std::vec::Vec;
 use std::{convert::TryFrom, io, net::SocketAddr, sync};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self};
+use tokio_rustls::rustls::{Certificate, PrivateKey};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
-
-
-type Client = hyper::client::Client<HttpConnector, Body>;
 
 fn error(err: String) -> io::Error {
     io::Error::new(io::ErrorKind::Other, err)
@@ -38,8 +35,6 @@ async fn main() {
         std::env::set_var("RUST_LOG", "tls_min=trace,tower_http=debug")
     }
     tracing_subscriber::fmt::init();
-
-    tokio::spawn(server());
 
     let mut certs_path = std::env::current_dir().unwrap();
     certs_path.push("self_signed_certs");
@@ -79,18 +74,16 @@ async fn main() {
         }
     };
 
-    let tls_service = ServiceBuilder::new()
-        .service(handler_proxy)
-        .layer(ServiceBuilder::new().layer(AddExtensionLayer::new(Client::new())));
+    let tls_service = ServiceBuilder::new().service(handler);
 
     // This is the approach that's currently not working
     /*
-    let tls_server_non_working = Server::builder(HyperAcceptor {
-        acceptor: Box::pin(incoming_tls_stream),
-    })
-    .serve(tls_service.into_make_service_with_connect_info::<SocketAddr, _>())
-    .await
-    .unwrap();
+        let tls_server_non_working = Server::builder(HyperAcceptor {
+            acceptor: Box::pin(incoming_tls_stream),
+        })
+        .serve(tls_service.into_make_service_with_connect_info::<SocketAddr, _>())
+        .await
+        .unwrap();
     */
 
     let tls_server_working = Server::builder(HyperAcceptor {
@@ -117,44 +110,11 @@ impl hyper::server::accept::Accept for HyperAcceptor<'_> {
     }
 }
 
-async fn handler_proxy(
-    Extension(client): Extension<Client>,
-    mut req: Request<Body>,
-) -> impl IntoResponse {
-    tracing::trace!("reverse proxy incoming request, https");
-    tracing::trace!("reverse proxy incoming request, req = {:?}", req);
-
-    let path = req.uri().path();
-    let path_query = req
-        .uri()
-        .path_and_query()
-        .map(|v| v.as_str())
-        .unwrap_or(path);
-
-    let uri = format!("http://127.0.0.1:3000{}", path_query);
-
-    *req.uri_mut() = Uri::try_from(uri).unwrap();
-
-    let response = client.request(req).await.unwrap();
-    tracing::trace!("proxy response: {:?}", response);
-    response.into_response().map(axum::body::box_body)
-}
-
-async fn server() {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    tracing::debug!("server listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(handler_server.into_make_service_with_connect_info::<SocketAddr, _>())
-        .await
-        .unwrap();
-}
-
-async fn handler_server(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+async fn handler(
+    //ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request<Body>,
 ) -> impl IntoResponse {
-    tracing::trace!("server incoming request, addr = {:?}", addr);
+    //tracing::trace!("server incoming request, addr = {:?}", addr);
     tracing::trace!("server incoming request, req = {:?}", req);
 
     Response::new(Body::from("Hello, world!"))
