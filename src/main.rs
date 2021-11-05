@@ -11,15 +11,18 @@ use std::path::Path;
 use std::pin::Pin;
 use std::vec::Vec;
 use std::{io, net::SocketAddr, sync};
+use axum::extract::ConnectInfo;
+use futures::future::poll_fn;
+use hyper::server::accept::Accept;
 
-use hyper::server::conn::Http;
+use hyper::server::conn::{AddrIncoming, Http};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self};
 use tokio_rustls::rustls::{Certificate, PrivateKey};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
-use tower::{ ServiceBuilder};
+use tower::{MakeService, ServiceBuilder};
 
 #[tokio::main]
 async fn main() {
@@ -51,26 +54,33 @@ async fn main() {
     };
 
     let tcp_listener = TcpListener::bind(&tls_addr).await.unwrap();
+    let mut tcp_listener = AddrIncoming::from_listener(tcp_listener).unwrap();
     let tls_acceptor = TlsAcceptor::from(tls_cfg);
 
     let tls_service = ServiceBuilder::new().service(handler);
+    let non_tls_service = ServiceBuilder::new().service(handler);
+    let mut tls_service_maker = tls_service.into_make_service_with_connect_info::<SocketAddr, _>();
 
     let tls_server = tokio::spawn ( async move {
     loop {
-        let (stream, _addr) = tcp_listener.accept().await.unwrap();
-        let acceptor = tls_acceptor.clone();
+        let stream = poll_fn(|cx| Pin::new(&mut tcp_listener).poll_accept(cx))
+            .await
+            .unwrap()
+            .unwrap();
 
-        let tls_service = tls_service.clone();
+        let tls_acceptor = tls_acceptor.clone();
+
+        let app = tls_service_maker.make_service(&stream).await.unwrap();
 
         tokio::spawn(async move {
-            if let Ok(stream) = acceptor.accept(stream).await {
-                let _ = Http::new().serve_connection(stream, tls_service.into_service()).await;
+            if let Ok(stream) = tls_acceptor.accept(stream).await {
+                let _ = Http::new().serve_connection(stream, app).await;
             }
         });
     }});
     let non_tls_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
     let non_tls_server = axum::Server::bind(&non_tls_addr)
-        .serve(tls_service.into_make_service());
+        .serve(non_tls_service.into_make_service_with_connect_info::<SocketAddr, _>());
     tokio::select! {
         _ = (tls_server) => {
             tracing::trace!("tls server stopped");
@@ -98,10 +108,10 @@ impl hyper::server::accept::Accept for HyperAcceptor<'_> {
 }
 
 async fn handler(
-    //ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request<Body>,
 ) -> impl IntoResponse {
-    //tracing::trace!("server incoming request, addr = {:?}", addr);
+    tracing::trace!("server incoming request, addr = {:?}", addr);
     tracing::trace!("server incoming request, req = {:?}", req);
 
     Response::new(Body::from("Hello, world!"))
